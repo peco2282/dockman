@@ -1,0 +1,34 @@
+# Go build outputs
+/dockman
+/dockman.exe
+*.test
+*.out
+*.prof
+coverage.*
+
+# Local Go caches
+/.gocache/
+/.gomodcache/
+
+# Workspace and editor settings
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Temporary files
+/tmp/
+/dist/
+*.log
+
