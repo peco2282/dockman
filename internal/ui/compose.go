@@ -28,6 +28,8 @@ type composeScreen struct {
 	logEvents      <-chan service.LogEvent
 	registerInputs []textinput.Model
 	registerFocus  int
+	// confirm holds the index of a destructive button awaiting y/n, or -1.
+	confirm int
 }
 
 func newComposeScreen() composeScreen {
@@ -38,7 +40,7 @@ func newComposeScreen() composeScreen {
 		inputs[i].Placeholder = placeholder
 		inputs[i].CharLimit = 512
 	}
-	return composeScreen{registerInputs: inputs}
+	return composeScreen{registerInputs: inputs, confirm: -1}
 }
 
 type composeProjectsLoadedMsg struct {
@@ -110,7 +112,7 @@ func (a App) updateComposeProjects(key string) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(a.compose.projects) > 0 {
 			a.compose.selected = a.compose.projects[a.compose.cursor]
-			a.compose.actionCursor = 0
+			a.compose.actionCursor, a.compose.confirm = 0, -1
 			a.compose.err = nil
 			a.compose.notice = ""
 			a.screen = ScreenComposeDetail
@@ -157,47 +159,107 @@ func (a App) updateComposeRegister(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
+type composeButtonKind int
+
+const (
+	composeButtonAction composeButtonKind = iota
+	composeButtonLogs
+	composeButtonContainers
+)
+
+type composeButton struct {
+	key     string
+	label   string
+	kind    composeButtonKind
+	action  service.ComposeAction
+	confirm bool
+}
+
+// composeButtons is the detail-screen button table, in cursor order.
+var composeButtons = []composeButton{
+	{key: "u", label: "Up", action: service.ComposeUp},
+	{key: "d", label: "Down", action: service.ComposeDown, confirm: true},
+	{key: "R", label: "Restart", action: service.ComposeRestart},
+	{key: "p", label: "Pull", action: service.ComposePull},
+	{key: "l", label: "Logs", kind: composeButtonLogs},
+	{key: "c", label: "Containers", kind: composeButtonContainers},
+	{key: "b", label: "Build", action: service.ComposeBuild},
+	{key: "U", label: "Up+Build", action: service.ComposeUpBuild},
+	{key: "s", label: "Stop", action: service.ComposeStop},
+	{key: "S", label: "Start", action: service.ComposeStart},
+	{key: "P", label: "Pause", action: service.ComposePause},
+	{key: "D", label: "Down+Orphans", action: service.ComposeDownRemoveOrphans, confirm: true},
+}
+
 func (a App) updateComposeDetail(key string) (tea.Model, tea.Cmd) {
 	if a.compose.working {
 		return a, nil
 	}
+	if a.compose.confirm >= 0 {
+		index := a.compose.confirm
+		a.compose.confirm = -1
+		if key == "y" {
+			return a.runComposeButton(index)
+		}
+		a.compose.notice = "Cancelled."
+		return a, nil
+	}
+	count := len(composeButtons)
 	switch key {
 	case "left", "up":
-		a.compose.actionCursor = (a.compose.actionCursor + 11) % 12
+		a.compose.actionCursor = (a.compose.actionCursor + count - 1) % count
 	case "right", "down", "tab":
-		a.compose.actionCursor = (a.compose.actionCursor + 1) % 12
+		a.compose.actionCursor = (a.compose.actionCursor + 1) % count
 	case "r":
 		a.compose.loading = true
 		a.screen = ScreenCompose
 		return a, tea.Batch(a.spinner.Tick, a.loadComposeProjects())
 	case "enter":
-		switch a.compose.actionCursor {
-		case 0, 1, 2, 3, 6, 7, 8, 9, 10, 11:
-			actionIndex := a.compose.actionCursor
-			if actionIndex >= 6 {
-				actionIndex -= 2
-			}
-			action := service.ComposeAction(actionIndex)
-			if action == service.ComposeRestart && a.compose.selected.RunningCount() == 0 {
-				a.compose.notice = "Restart unavailable: no project containers are running."
-				return a, nil
-			}
-			a.compose.working = true
-			a.compose.err = nil
-			a.compose.notice = action.String() + " in progress..."
-			project := a.compose.selected
-			return a, tea.Batch(a.spinner.Tick, func() tea.Msg {
-				return composeActionResultMsg{action, a.composeService.Execute(context.Background(), project, action)}
-			})
-		case 4:
-			return a.openComposeLogs()
-		case 5:
-			a.screen = ScreenComposeContainers
-		}
+		return a.pressComposeButton(a.compose.actionCursor)
 	case "esc", "q", "backspace":
 		a.screen = ScreenCompose
+	default:
+		for i, button := range composeButtons {
+			if button.key == key {
+				a.compose.actionCursor = i
+				return a.pressComposeButton(i)
+			}
+		}
 	}
 	return a, nil
+}
+
+// pressComposeButton asks for confirmation first when the button needs it.
+func (a App) pressComposeButton(index int) (tea.Model, tea.Cmd) {
+	if composeButtons[index].confirm {
+		a.compose.confirm = index
+		a.compose.err, a.compose.notice = nil, ""
+		return a, nil
+	}
+	return a.runComposeButton(index)
+}
+
+func (a App) runComposeButton(index int) (tea.Model, tea.Cmd) {
+	button := composeButtons[index]
+	switch button.kind {
+	case composeButtonLogs:
+		return a.openComposeLogs()
+	case composeButtonContainers:
+		a.screen = ScreenComposeContainers
+		return a, nil
+	}
+	action := button.action
+	if action == service.ComposeRestart && a.compose.selected.RunningCount() == 0 {
+		a.compose.notice = "Restart unavailable: no project containers are running."
+		return a, nil
+	}
+	a.compose.working = true
+	a.compose.err = nil
+	a.compose.notice = action.String() + " in progress..."
+	project := a.compose.selected
+	return a, tea.Batch(a.spinner.Tick, func() tea.Msg {
+		return composeActionResultMsg{action, a.composeService.Execute(context.Background(), project, action)}
+	})
 }
 
 func (a App) openComposeLogs() (tea.Model, tea.Cmd) {
@@ -351,16 +413,20 @@ func (a App) renderComposeDetail() string {
 		}
 	}
 	b.WriteString("\n")
-	labels := []string{"Up", "Down", "Restart", "Pull", "Logs", "Containers", "Build", "Up+Build", "Stop", "Start", "Pause", "Down+Orphans"}
-	for i, label := range labels {
-		disabled := i == 2 && p.RunningCount() == 0
-		text := "[ " + label + " ]"
-		if disabled {
-			text = mutedStyle.Render("[ " + label + " unavailable ]")
+	for i, button := range composeButtons {
+		text := "[" + button.key + "] " + button.label
+		if button.action == service.ComposeRestart && button.kind == composeButtonAction && p.RunningCount() == 0 {
+			text = mutedStyle.Render(text)
 		} else if i == a.compose.actionCursor {
-			text = selectedStyle.Render(text)
+			text = selectedStyle.Render("> " + text)
 		}
-		b.WriteString(text + "  ")
+		if i > 0 && i%6 == 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(text + "   ")
+	}
+	if a.compose.confirm >= 0 {
+		b.WriteString("\n\n" + errorStyle.Render(fmt.Sprintf("Run %s on %q? Containers will be removed.", composeButtons[a.compose.confirm].action, p.Name)) + "  y Yes / any other key No")
 	}
 	if a.compose.notice != "" {
 		b.WriteString("\n\n" + a.compose.notice)
@@ -371,7 +437,7 @@ func (a App) renderComposeDetail() string {
 	if a.compose.err != nil {
 		b.WriteString("\n" + errorStyle.Render(friendlyError(a.compose.err)))
 	}
-	b.WriteString("\n\n" + mutedStyle.Render("←→ Choose   Enter Run/Open   r Refresh   Esc Back"))
+	b.WriteString("\n\n" + mutedStyle.Render("Key or ←→ + Enter Run   r Refresh   Esc Back"))
 	return b.String()
 }
 

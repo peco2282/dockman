@@ -44,6 +44,8 @@ type containerScreen struct {
 	query           string
 	filter          int
 	sort            int
+	// origin is the screen that logs, terminal, and delete return to.
+	origin Screen
 }
 
 var containerFilters = []string{"All", "Running", "Stopped"}
@@ -117,7 +119,13 @@ type containerDetailLoadedMsg struct {
 }
 type containerActionResultMsg struct {
 	action service.ContainerAction
+	id     string
+	name   string
 	err    error
+}
+type containerShellExitedMsg struct {
+	name string
+	err  error
 }
 
 func (a App) loadContainers() tea.Cmd {
@@ -132,10 +140,76 @@ func (a App) loadContainerDetail(id string) tea.Cmd {
 		return containerDetailLoadedMsg{detail, err}
 	}
 }
-func (a App) executeContainerAction(id string, action service.ContainerAction) tea.Cmd {
+func (a App) executeContainerAction(id, name string, action service.ContainerAction) tea.Cmd {
 	return func() tea.Msg {
-		return containerActionResultMsg{action, a.containersService.Execute(context.Background(), id, action)}
+		return containerActionResultMsg{action, id, name, a.containersService.Execute(context.Background(), id, action)}
 	}
+}
+
+func detailFromContainer(item model.Container) model.ContainerDetail {
+	return model.ContainerDetail{ID: item.ID, Name: item.Name, Image: item.Image, State: item.State, Running: item.Running(), Created: item.Created, Ports: item.Ports}
+}
+
+// containerShortcut runs a single-key action against a.containers.detail.
+// The list and the detail screen share it so both respond to the same keys.
+func (a App) containerShortcut(key string, origin Screen) (tea.Model, tea.Cmd, bool) {
+	d := a.containers.detail
+	switch key {
+	case "S":
+		action := service.ContainerStart
+		if d.Running {
+			action = service.ContainerStop
+		}
+		m, cmd := a.runContainerAction(action)
+		return m, cmd, true
+	case "R":
+		m, cmd := a.runContainerAction(service.ContainerRestart)
+		return m, cmd, true
+	case "l":
+		a.containers.origin = origin
+		m, cmd := a.openContainerLogs()
+		return m, cmd, true
+	case "t", "e":
+		if !d.Running {
+			a.containers.notice = "Terminal is available only while the container is running."
+			return a, nil, true
+		}
+		a.containers.origin = origin
+		if key == "e" {
+			a.containers.err, a.containers.notice = nil, ""
+			return a, a.openContainerShell(), true
+		}
+		m, cmd := a.openContainerTerminal()
+		return m, cmd, true
+	case "D":
+		a.containers.origin = origin
+		a.screen, a.containers.deleteCursor, a.containers.err, a.containers.notice = ScreenContainerDelete, 0, nil, ""
+		return a, nil, true
+	}
+	return a, nil, false
+}
+
+func (a App) runContainerAction(action service.ContainerAction) (tea.Model, tea.Cmd) {
+	d := a.containers.detail
+	if (action == service.ContainerStart && d.Running) || (action != service.ContainerStart && !d.Running) {
+		a.containers.notice = action.String() + " is unavailable for the current state"
+		return a, nil
+	}
+	a.containers.working, a.containers.err = true, nil
+	a.containers.notice = action.String() + "ing " + d.Name + "..."
+	if action == service.ContainerStop {
+		a.containers.notice = "Stopping " + d.Name + "..."
+	}
+	return a, tea.Batch(a.spinner.Tick, a.executeContainerAction(d.ID, d.Name, action))
+}
+
+// openContainerShell hands the whole terminal to `docker exec -it`, so
+// full-screen programs such as vim, less, and top work normally.
+func (a App) openContainerShell() tea.Cmd {
+	name := a.containers.detail.Name
+	return tea.ExecProcess(a.containersService.ShellCommand(a.containers.detail.ID), func(err error) tea.Msg {
+		return containerShellExitedMsg{name, err}
+	})
 }
 
 func (a App) updateContainers(key string) (tea.Model, tea.Cmd) {
@@ -166,6 +240,13 @@ func (a App) updateContainers(key string) (tea.Model, tea.Cmd) {
 	}
 	items := a.containers.visibleItems()
 	switch key {
+	case "S", "R", "l", "t", "e", "D":
+		if len(items) == 0 || a.containers.working {
+			return a, nil
+		}
+		a.containers.detail = detailFromContainer(items[a.containers.cursor])
+		m, cmd, _ := a.containerShortcut(key, ScreenContainers)
+		return m, cmd
 	case "up", "k":
 		if len(items) > 0 {
 			a.containers.cursor = (a.containers.cursor - 1 + len(items)) % len(items)
@@ -210,6 +291,11 @@ func (a App) updateContainers(key string) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// containerDetailButtons lists the detail-screen buttons in cursor order.
+var containerDetailButtons = []struct{ key, label string }{
+	{"S", "Start"}, {"S", "Stop"}, {"R", "Restart"}, {"l", "Logs"}, {"t", "Terminal"}, {"e", "Shell"}, {"D", "Delete"},
+}
+
 func (a App) updateContainerDetail(key string) (tea.Model, tea.Cmd) {
 	if a.containers.loading || a.containers.working {
 		if key == "esc" && !a.containers.working {
@@ -217,6 +303,10 @@ func (a App) updateContainerDetail(key string) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	}
+	if m, cmd, ok := a.containerShortcut(key, ScreenContainerDetail); ok {
+		return m, cmd
+	}
+	count := len(containerDetailButtons)
 	switch key {
 	case "n":
 		a.containers.create = cloneContainerCreateForm(a.containers.detail)
@@ -224,38 +314,22 @@ func (a App) updateContainerDetail(key string) (tea.Model, tea.Cmd) {
 		a.screen = ScreenContainerCreate
 		return a, a.containers.create.inputs[0].Focus()
 	case "left", "up":
-		a.containers.actionCursor = (a.containers.actionCursor + 5) % 6
+		a.containers.actionCursor = (a.containers.actionCursor + count - 1) % count
 	case "right", "down", "tab":
-		a.containers.actionCursor = (a.containers.actionCursor + 1) % 6
+		a.containers.actionCursor = (a.containers.actionCursor + 1) % count
 	case "r":
 		a.containers.loading, a.containers.err = true, nil
 		return a, tea.Batch(a.spinner.Tick, a.loadContainerDetail(a.containers.detail.ID))
 	case "enter":
-		if a.containers.actionCursor == 3 {
-			return a.openContainerLogs()
+		switch a.containers.actionCursor {
+		case 0:
+			return a.runContainerAction(service.ContainerStart)
+		case 1:
+			return a.runContainerAction(service.ContainerStop)
+		default:
+			m, cmd, _ := a.containerShortcut(containerDetailButtons[a.containers.actionCursor].key, ScreenContainerDetail)
+			return m, cmd
 		}
-		if a.containers.actionCursor == 4 {
-			if !a.containers.detail.Running {
-				a.containers.notice = "Terminal is available only while the container is running."
-				return a, nil
-			}
-			return a.openContainerTerminal()
-		}
-		if a.containers.actionCursor == 5 {
-			a.screen, a.containers.deleteCursor, a.containers.err, a.containers.notice = ScreenContainerDelete, 0, nil, ""
-			return a, nil
-		}
-		action := service.ContainerAction(a.containers.actionCursor)
-		if (action == service.ContainerStart && a.containers.detail.Running) || (action != service.ContainerStart && !a.containers.detail.Running) {
-			a.containers.notice = action.String() + " is unavailable for the current state"
-			return a, nil
-		}
-		a.containers.working, a.containers.err = true, nil
-		a.containers.notice = action.String() + "ing..."
-		if action == service.ContainerStop {
-			a.containers.notice = "Stopping..."
-		}
-		return a, tea.Batch(a.spinner.Tick, a.executeContainerAction(a.containers.detail.ID, action))
 	case "esc", "q", "backspace":
 		a.screen = ScreenContainers
 	}
@@ -308,9 +382,15 @@ func (a App) renderContainers() string {
 		}
 	}
 	if a.containers.notice != "" {
-		b.WriteString("\n" + a.containers.notice + "\n")
+		b.WriteString("\n" + a.containers.notice)
+		if a.containers.working {
+			b.WriteString(" " + a.spinner.View())
+		}
+		b.WriteString("\n")
 	}
-	b.WriteString("\n" + mutedStyle.Render("↑↓ Move   Enter Details   d Stats   c Create   r Refresh   Esc Back"))
+	b.WriteString("\n" + mutedStyle.Render("S Start/Stop   R Restart   l Logs   e Shell   t Terminal   D Delete") + "\n")
+	b.WriteString(mutedStyle.Render("↑↓ Move   Enter Details   / Search   f Filter   s Sort") + "\n")
+	b.WriteString(mutedStyle.Render("d Stats   c Create   x Context   r Refresh   Esc Back"))
 	return b.String()
 }
 
@@ -359,30 +439,25 @@ func (a App) renderContainerDetail() string {
 		}
 	}
 	b.WriteString("\n")
-	actions := []service.ContainerAction{service.ContainerStart, service.ContainerStop, service.ContainerRestart}
-	for i, action := range actions {
-		disabled := (action == service.ContainerStart && d.Running) || (action != service.ContainerStart && !d.Running)
-		label := "[ " + action.String() + " ]"
-		if disabled {
-			label = mutedStyle.Render("[ " + action.String() + " unavailable ]")
-		} else if i == a.containers.actionCursor {
-			label = selectedStyle.Render(label)
+	for i, button := range containerDetailButtons {
+		disabled := false
+		switch i {
+		case 0:
+			disabled = d.Running
+		case 1, 2, 4, 5:
+			disabled = !d.Running
 		}
-		b.WriteString(label + "  ")
+		label := "[" + button.key + "] " + button.label
+		if disabled {
+			label = mutedStyle.Render(label)
+		} else if i == a.containers.actionCursor {
+			label = selectedStyle.Render("> " + label)
+		}
+		if i == 4 {
+			b.WriteString("\n")
+		}
+		b.WriteString(label + "   ")
 	}
-	logsLabel, terminalLabel, deleteLabel := "[ Logs ]", "[ Terminal ]", "[ Delete ]"
-	if a.containers.actionCursor == 3 {
-		logsLabel = selectedStyle.Render(logsLabel)
-	}
-	if !d.Running {
-		terminalLabel = mutedStyle.Render("[ Terminal unavailable ]")
-	} else if a.containers.actionCursor == 4 {
-		terminalLabel = selectedStyle.Render(terminalLabel)
-	}
-	if a.containers.actionCursor == 5 {
-		deleteLabel = selectedStyle.Render(deleteLabel)
-	}
-	b.WriteString(logsLabel + "  " + terminalLabel + "  " + deleteLabel)
 	if a.containers.notice != "" {
 		b.WriteString("\n\n" + a.containers.notice)
 	}
@@ -392,7 +467,7 @@ func (a App) renderContainerDetail() string {
 	if a.containers.err != nil {
 		b.WriteString("\n" + errorStyle.Render(friendlyError(a.containers.err)))
 	}
-	b.WriteString("\n\n" + mutedStyle.Render("←→ Choose   Enter Run   n Clone   r Refresh   Esc Back"))
+	b.WriteString("\n\n" + mutedStyle.Render("Key or ←→ + Enter Run   n Clone   r Refresh   Esc Back"))
 	return b.String()
 }
 

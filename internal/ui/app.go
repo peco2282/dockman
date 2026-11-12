@@ -3,6 +3,8 @@ package ui
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -24,6 +26,7 @@ type ContainerManager interface {
 	Delete(context.Context, string, service.ContainerDeleteMode) error
 	Create(context.Context, service.ContainerCreateInput) (string, error)
 	OpenTerminal(context.Context, string, uint, uint) (model.TerminalSession, <-chan model.TerminalEvent, error)
+	ShellCommand(string) *exec.Cmd
 }
 
 type ImageManager interface {
@@ -185,8 +188,25 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.containers.err, a.containers.notice = msg.err, msg.action.String()+" failed"
 			return a, nil
 		}
-		a.containers.err, a.containers.notice = nil, msg.action.String()+" completed"
-		return a, tea.Batch(a.loadContainers(), a.loadContainerDetail(a.containers.detail.ID))
+		a.containers.err, a.containers.notice = nil, msg.action.String()+" completed: "+msg.name
+		if a.screen == ScreenContainerDetail && a.containers.detail.ID == msg.id {
+			return a, tea.Batch(a.loadContainers(), a.loadContainerDetail(msg.id))
+		}
+		return a, a.loadContainers()
+	case containerShellExitedMsg:
+		var exitErr *exec.ExitError
+		switch {
+		case errors.As(msg.err, &exitErr):
+			a.containers.notice = fmt.Sprintf("Shell for %s exited with code %d.", msg.name, exitErr.ExitCode())
+		case msg.err != nil:
+			a.containers.err, a.containers.notice = msg.err, "Could not open shell for "+msg.name
+		default:
+			a.containers.notice = "Shell session for " + msg.name + " ended."
+		}
+		if a.screen == ScreenContainerDetail {
+			return a, tea.Batch(a.loadContainers(), a.loadContainerDetail(a.containers.detail.ID))
+		}
+		return a, a.loadContainers()
 	case logStreamOpenedMsg:
 		a.containers.loading, a.containers.err = false, msg.err
 		if msg.err == nil {

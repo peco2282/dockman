@@ -160,3 +160,17 @@ func TestContainerServiceTerminalStreamsOutput(t *testing.T) {
 		t.Fatalf("output = %q", output)
 	}
 }
+
+type namedContext string
+
+func (n namedContext) ContextName() string { return string(n) }
+
+func TestShellArgsUsesCurrentContext(t *testing.T) {
+	got := shellArgs(namedContext("remote"), "abc")
+	if len(got) < 5 || got[0] != "--context" || got[1] != "remote" || got[2] != "exec" || got[3] != "-it" || got[4] != "abc" {
+		t.Fatalf("args = %q", got)
+	}
+	if got := shellArgs(namedContext(""), "abc"); got[0] != "exec" {
+		t.Fatalf("args without context = %q", got)
+	}
+}

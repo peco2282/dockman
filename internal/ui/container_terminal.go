@@ -58,9 +58,12 @@ func (a *App) appendTerminalOutput(data []byte) {
 
 func (a App) updateContainerTerminal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	if key == "esc" || key == "ctrl+]" {
+	// Esc belongs to the shell (vim, less, readline) while a session is open,
+	// so only Ctrl+] detaches. Without a live session Esc simply goes back.
+	live := a.containers.terminalSession != nil && !a.containers.terminalDone
+	if key == "ctrl+]" || (key == "esc" && !live) {
 		a.closeContainerTerminal()
-		a.screen = ScreenContainerDetail
+		a.screen = a.containers.originOr()
 		return a, nil
 	}
 	if a.containers.loading {
@@ -69,7 +72,7 @@ func (a App) updateContainerTerminal(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if a.containers.terminalDone {
 		if key == "enter" {
 			a.closeContainerTerminal()
-			a.screen = ScreenContainerDetail
+			a.screen = a.containers.originOr()
 		}
 		return a, nil
 	}
@@ -124,6 +127,8 @@ func terminalKeyBytes(msg tea.KeyPressMsg) []byte {
 	switch msg.String() {
 	case "enter":
 		return []byte{'\r'}
+	case "esc":
+		return []byte{0x1b}
 	case "tab":
 		return []byte{'\t'}
 	case "backspace":
@@ -179,7 +184,7 @@ func applyTerminalText(current, incoming string) string {
 func (a App) renderContainerTerminal() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Terminal - "+a.containers.detail.Name) + "\n")
-	b.WriteString(mutedStyle.Render("Interactive Docker Exec session   Esc or Ctrl+] Detach") + "\n")
+	b.WriteString(mutedStyle.Render("Ctrl+] Detach   (for vim/top, use e for a full-screen shell)") + "\n")
 	if a.containers.loading {
 		b.WriteString("\n" + a.spinner.View() + " Opening /bin/bash or /bin/sh...")
 		return b.String()

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -206,3 +207,5 @@ func TestContainerImagePickerSelectsReference(t *testing.T) {
 		t.Fatalf("selection = %v %q", got.screen, got.containers.create.inputs[1].Value())
 	}
 }
+
+func (fakeContainers) ShellCommand(id string) *exec.Cmd { return exec.Command("true", id) }

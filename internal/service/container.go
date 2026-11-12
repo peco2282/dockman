@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -143,6 +144,20 @@ func (s *ContainerService) Execute(ctx context.Context, id string, action Contai
 	default:
 		return fmt.Errorf("unsupported container action: %d", action)
 	}
+}
+
+// ShellCommand returns a `docker exec -it` command that opens bash (or sh)
+// in the container, using the same Docker context dockman is connected to.
+func (s *ContainerService) ShellCommand(id string) *exec.Cmd {
+	return exec.Command("docker", shellArgs(s.repository, id)...)
+}
+
+func shellArgs(repository any, id string) []string {
+	var args []string
+	if provider, ok := repository.(contextNameProvider); ok && provider.ContextName() != "" {
+		args = append(args, "--context", provider.ContextName())
+	}
+	return append(args, "exec", "-it", id, "/bin/sh", "-c", "if [ -x /bin/bash ]; then exec /bin/bash; else exec /bin/sh; fi")
 }
 
 func (s *ContainerService) Stats(ctx context.Context, id string) (model.ContainerStats, error) {

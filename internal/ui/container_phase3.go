@@ -96,7 +96,7 @@ func (a App) updateContainerLogs(key string) (tea.Model, tea.Cmd) {
 			a.logCancel()
 			a.logCancel = nil
 		}
-		a.screen = ScreenContainerDetail
+		a.screen = a.containers.originOr()
 	}
 	return a, nil
 }
@@ -142,10 +142,10 @@ func (a App) updateContainerDelete(key string) (tea.Model, tea.Cmd) {
 	case "right", "down", "tab":
 		a.containers.deleteCursor = (a.containers.deleteCursor + 1) % count
 	case "esc", "q", "backspace":
-		a.screen = ScreenContainerDetail
+		a.screen = a.containers.originOr()
 	case "enter":
 		if a.containers.deleteCursor == 0 {
-			a.screen = ScreenContainerDetail
+			a.screen = a.containers.originOr()
 			return a, nil
 		}
 		mode := service.DeleteStopped
@@ -194,4 +194,13 @@ func (a App) renderContainerDelete() string {
 	}
 	b.WriteString("\n\n" + mutedStyle.Render("←→ Choose   Enter Confirm   Esc Cancel"))
 	return b.String()
+}
+
+// originOr returns the screen a sub-screen was opened from. Older entry points
+// that never set an origin fall back to the detail screen.
+func (s containerScreen) originOr() Screen {
+	if s.origin == ScreenContainers {
+		return ScreenContainers
+	}
+	return ScreenContainerDetail
 }
